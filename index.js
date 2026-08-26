@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Bot State
+// Global Controller State
 let isAutoReplyActive = true;
 
 // Default System Persona for Selling Websites & Personal Consulting
@@ -25,7 +25,8 @@ Guidelines:
 - Ask 1-2 clarifying questions: What type of business is it? Do they already have a domain/hosting or design idea?
 - Emphasize benefits: Fast loading speed, mobile responsive design, modern UI/UX, and free 1-month support.
 - Keep responses concise for WhatsApp (max 3-5 sentences).
-- If client asks for direct human contact or a call, ask for their preferred time or state that the lead developer will connect shortly.`;
+- If the client shows strong intent to buy, specifies their budget/requirement, agrees to start, or asks for a callback/call, APPEND THIS SPECIAL TAG AT THE VERY END OF YOUR RESPONSE:
+[LEAD_CONFIRMED: <1-sentence summary of requirement, package, and budget>]`;
 
 // In-memory conversation history store (Key: Phone number, Value: Array of messages)
 const conversationHistory = new Map();
@@ -33,35 +34,60 @@ const conversationHistory = new Map();
 // Environment Variables
 const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || 'http://localhost:8080';
 const API_KEY = process.env.EVOLUTION_API_KEY || 'global_api_key';
-const INSTANCE_NAME = process.env.INSTANCE_NAME || 'my-bot';
+const INSTANCE_NAME = process.env.INSTANCE_NAME || 'Dev Flow';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// Generate AI response using Gemini with memory
-async function generateAIReply(userNumber, userMessage) {
-  if (!GEMINI_API_KEY) {
-    return "Thank you for reaching out! We provide custom web development and digital solutions. Our team will get back to you shortly.";
+// Function: Send Real-Time Telegram Lead Notification
+async function sendTelegramLeadAlert(clientNumber, leadSummary) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log('[Telegram Alert Skipped] Missing Bot Token or Chat ID');
+    return;
   }
 
-  // Retrieve or initialize conversation history for this contact
+  const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const messageText = `🔥 *NEW WEBSITE LEAD DETECTED*\n\n` +
+                      `📱 *Client WhatsApp:* \`+${clientNumber}\`\n` +
+                      `📝 *Lead Details:* ${leadSummary}\n` +
+                      `⏱ *Time:* ${timestamp}`;
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: messageText,
+      parse_mode: 'Markdown'
+    });
+    console.log(`[Telegram] Alert sent successfully for +${clientNumber}`);
+  } catch (err) {
+    console.error('[Telegram Error]', err.response?.data || err.message);
+  }
+}
+
+// Function: Generate AI Response via Gemini with Sliding Memory
+async function generateAIReply(userNumber, userMessage) {
+  if (!GEMINI_API_KEY) {
+    return "Thank you for reaching out! We build fast, modern websites and custom web apps. Our lead developer will connect with you shortly.";
+  }
+
   if (!conversationHistory.has(userNumber)) {
     conversationHistory.set(userNumber, []);
   }
   const history = conversationHistory.get(userNumber);
 
-  // Maintain sliding window (last 6 messages)
+  // Keep last 6 messages to avoid context overflow
   if (history.length > 6) {
     history.splice(0, history.length - 6);
   }
 
-  // Build history context string
-  const conversationContext = history
+  const contextText = history
     .map(entry => `${entry.role === 'user' ? 'Client' : 'Assistant'}: ${entry.text}`)
     .join('\n');
 
   const fullPrompt = `${systemPersona}
 
 Recent Conversation:
-${conversationContext}
+${contextText}
 Client: ${userMessage}
 Assistant:`;
 
@@ -76,27 +102,28 @@ Assistant:`;
       headers: { 'Content-Type': 'application/json' }
     });
 
-    const aiText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-    const finalReply = aiText || "Thank you for your message! How can I assist with your website requirement today?";
+    const aiRawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const finalReply = aiRawText || "Thank you for contacting us! How can we assist you with your website requirement?";
 
-    // Save to memory
+    // Save turn in memory
     history.push({ role: 'user', text: userMessage });
     history.push({ role: 'assistant', text: finalReply });
 
     return finalReply;
   } catch (error) {
-    console.error("[Gemini API Error]", error.response?.data || error.message);
-    return "Hi! Thanks for getting in touch. I am having a brief network issue, but please let me know what kind of website you need and I will assist you right away.";
+    console.error('[Gemini API Error]', error.response?.data || error.message);
+    return "Hi! Thanks for getting in touch. Please let me know what kind of website you need and I will assist you right away.";
   }
 }
 
-// REST API for Dashboard
+// Dashboard REST Endpoints
 app.get('/api/status', (req, res) => {
   res.json({
     active: isAutoReplyActive,
     persona: systemPersona,
     instance: INSTANCE_NAME,
-    activeChats: conversationHistory.size
+    activeChats: conversationHistory.size,
+    telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
   });
 });
 
@@ -112,7 +139,7 @@ app.post('/api/settings', (req, res) => {
 
 app.post('/api/clear-history', (req, res) => {
   conversationHistory.clear();
-  res.json({ success: true, message: "Chat memory cleared" });
+  res.json({ success: true, message: 'Conversation memory cleared.' });
 });
 
 // Evolution API Webhook Receiver
@@ -135,11 +162,24 @@ app.post('/webhook', async (req, res) => {
 
     if (incomingText) {
       const recipientNumber = remoteJid.replace('@s.whatsapp.net', '');
-      console.log(`[Incoming] ${recipientNumber}: "${incomingText}"`);
+      console.log(`[Incoming WhatsApp] +${recipientNumber}: "${incomingText}"`);
 
       try {
-        const aiResponseText = await generateAIReply(recipientNumber, incomingText);
+        let aiResponseText = await generateAIReply(recipientNumber, incomingText);
 
+        // Check if lead detection triggered
+        if (aiResponseText.includes('[LEAD_CONFIRMED:')) {
+          const match = aiResponseText.match(/\[LEAD_CONFIRMED:\s*(.*?)\]/);
+          const leadDetails = match ? match[1] : 'Client showed purchase intent';
+
+          // Send Telegram notification
+          await sendTelegramLeadAlert(recipientNumber, leadDetails);
+
+          // Clean up tag before sending message to the user
+          aiResponseText = aiResponseText.replace(/\[LEAD_CONFIRMED:.*?\]/, '').trim();
+        }
+
+        // Send reply back via Evolution API
         await axios.post(
           `${EVOLUTION_API_URL}/message/sendText/${INSTANCE_NAME}`,
           {
@@ -153,7 +193,7 @@ app.post('/webhook', async (req, res) => {
             }
           }
         );
-        console.log(`[Sent] Reply to ${recipientNumber}`);
+        console.log(`[Sent WhatsApp] Replied to +${recipientNumber}`);
       } catch (err) {
         console.error('[Send Error]', err.response?.data || err.message);
       }
@@ -163,5 +203,5 @@ app.post('/webhook', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Web Assistant Server running on port ${PORT}`);
+  console.log(`WhatsApp Assistant Server active on port ${PORT}`);
 });
