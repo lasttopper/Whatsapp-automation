@@ -253,14 +253,17 @@ app.post('/webhook', async (req, res) => {
           aiResponseText = aiResponseText.replace(/\[LEAD_CONFIRMED:.*?\]/, '').trim();
         }
 
-        // Send reply via Evolution API with typing simulation
+        // Random human typing delay between 2000ms and 4000ms (2 to 4 seconds)
+        const humanDelay = Math.floor(Math.random() * (4000 - 2000 + 1)) + 2000;
+
+        // Send reply via Evolution API with realistic typing simulation
         await axios.post(
           `${EVOLUTION_API_URL}/message/sendText/${INSTANCE_NAME}`,
           {
             number: recipientNumber,
             text: aiResponseText,
             options: {
-              delay: 1500,
+              delay: humanDelay,
               presence: "composing"
             }
           },
@@ -271,7 +274,7 @@ app.post('/webhook', async (req, res) => {
             }
           }
         );
-        console.log(`[🚀 Sent WhatsApp] Replied to +${recipientNumber}: "${aiResponseText}"`);
+        console.log(`[🚀 Sent WhatsApp] Replied to +${recipientNumber} (Delay: ${humanDelay}ms): "${aiResponseText}"`);
       } catch (err) {
         console.error('[Send Error]', err.response?.data || err.message);
       }
@@ -283,4 +286,4 @@ app.listen(PORT, () => {
   console.log(`\n✅ WhatsApp Sales Assistant Server active on port ${PORT}`);
   console.log(`🔗 Instance: ${INSTANCE_NAME} | Evolution URL: ${EVOLUTION_API_URL}\n`);
 });
-    
+        
